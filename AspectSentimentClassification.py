@@ -135,7 +135,7 @@ def readCSVFileToTrain():
         analyzer='word',  # features made of words
         #token_pattern=r'\w{1,}',  # tokenize only words of 4+ chars
         ngram_range=(1, 1),  # features made of a single tokens
-        use_idf=True,  # enable inverse-document-frequency reweighting
+        use_idf=True,  # enable inverse-document-frequency reweightings
         smooth_idf=True,  # prevents zero division for unseen words
         sublinear_tf=True,
         vocabulary=features_set)
