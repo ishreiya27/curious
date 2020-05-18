@@ -1,0 +1,422 @@
+# Big Data Analytics - IDS 561 - Final Project
+## Recommendation system using ALS and KNN algorithms
+
+---
+
+
+### Submitted By:
+### Sakshi Kabra - 660185526
+### Vaidehi Deshmukh - 656205552
+### Shreiya Samarjeet Indulkar - 663477095 
+
+!apt-get install openjdk-8-jdk-headless -qq > /dev/null
+!wget -q https://www-us.apache.org/dist/spark/spark-2.4.5/spark-2.4.5-bin-hadoop2.7.tgz
+!tar xf spark-2.4.5-bin-hadoop2.7.tgz
+!pip install -q findspark
+
+import os
+os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-8-openjdk-amd64"
+os.environ["SPARK_HOME"] = "/content/spark-2.4.5-bin-hadoop2.7"
+
+import findspark
+findspark.init()
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.master("local[*]").getOrCreate()
+
+#Importing the data as a pandas dataframe and printing its shape
+import pandas as pd
+anime_list = pd.read_csv("/content/AnimeMovies.csv", error_bad_lines=False) 
+anime_list.shape
+
+anime_list.head(10)
+
+#Importing the data as a pandas dataframe and printing its shape
+import pandas as pd
+anime_reviews = pd.read_csv("/content/AnimeRatings.csv", error_bad_lines=False) 
+anime_reviews.shape
+
+anime_reviews.dtypes
+
+anime_reviews.head(10)
+
+len(anime_reviews.overallRating.unique())
+
+# ALS matrix Factorization using pyspark dataframe
+
+# Converting Pandas Dataframe "anime_reviews" into Spark Dataframe "anime_sdf" and printing the first 10 rows
+
+anime_reviews = anime_reviews.astype(str) # Converting pandas df to string first
+anime_sdf = spark.createDataFrame(anime_reviews)
+anime_sdf.show(10, False) # False allows us to show entire content of the columns
+
+# Checking the datatype of our Spark dataframe file anime_sdf
+print(type(anime_sdf))
+
+# Checking the datatypes of each variable in anime_sdf
+anime_sdf.printSchema()
+
+# Converting data type of UserID, workId and oversallRating into Integer Type
+from pyspark.sql.types import *
+
+anime_sdf = anime_sdf.withColumn("User", anime_sdf["UserId"].cast(IntegerType())).drop("UserId").withColumnRenamed("User", "UserId")
+anime_sdf = anime_sdf.withColumn("AnimeId", anime_sdf["workId"].cast(IntegerType())).drop("workId").withColumnRenamed("AnimeId", "workId")
+anime_sdf = anime_sdf.withColumn("Rating", anime_sdf["overallRating"].cast(IntegerType())).drop("overallRating").withColumnRenamed("Rating", "overallRating")
+
+
+# import libraries
+from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.ml.recommendation import ALS
+from pyspark.ml.tuning import TrainValidationSplit, ParamGridBuilder
+from pyspark.sql import Row
+
+
+# Training and test split
+training_RDD, test_RDD = anime_sdf.randomSplit([.8, .2], seed=10)
+
+training_RDD.show(10)
+
+movieRecs.show(10)
+
+## Cross Validation for Parameter Tuning of ALS model
+
+
+
+# Let's initialize our ALS learner
+alstune = ALS()
+
+# Now we set the parameters for the method
+alstune.setMaxIter(25)\
+.setItemCol('workId')\
+.setRatingCol('overallRating')\
+.setUserCol('UserId')
+
+# Now let's compute an evaluation metric for our test dataset
+from pyspark.ml.evaluation import RegressionEvaluator
+
+# Create an RMSE evaluator using the label and predicted columns
+reg_eval = RegressionEvaluator(predictionCol="prediction", labelCol="overallRating", metricName="rmse")
+
+tolerance = 0.03
+ranks = [x for x in range(10,100, 10)]
+regularizer = [0.01,0.05, 0.1,0.2,0.5]
+errors = [0 for x in ranks]
+models = [0 for x in ranks]
+
+innerpar = [0 for x in regularizer]
+err = 0
+min_error = float('inf')
+best_rank = -1
+best_par = -10
+for rank in ranks:
+  # Set the rank here:
+  alstune.setRank(rank)
+
+  regs = 0
+  for regPar in regularizer:
+    alstune.setRegParam(regPar)
+    # Create the model with these parameters.
+    model = alstune.fit(training_RDD)
+    # Run the model to create a prediction. Predict against the validation_df.
+    predict_df = model.transform(test_RDD)
+    # Remove NaN values from prediction (due to SPARK-14489)
+    predicted_ratings_df = predict_df.filter(predict_df.prediction != float('nan'))
+    # Run the previously created RMSE evaluator, reg_eval, on the predicted_ratings_df DataFrame
+    error = reg_eval.evaluate(predicted_ratings_df)
+    innerpar[regs] = error
+    
+    print ('For rank %s and regPar %s the RMSE is %s' % (rank, regPar, error))
+    if error < min_error:
+      min_error = error
+      best_rank = err
+      best_par = regs
+    
+    regs+=1
+
+  errors[err] = innerpar
+  err += 1
+  
+      
+alstune.setRank(ranks[best_rank]).setRegParam(regularizer[best_par])
+print ('The best model was trained with rank %s and regularizing parameter %s' % (ranks[best_rank], regularizer[best_par]) )
+
+
+# Training the model
+als = ALS(maxIter=25,regParam=0.5,rank=80,itemCol="workId",userCol="UserId",ratingCol="overallRating",coldStartStrategy="drop",nonnegative=True)
+model = als.fit(training_RDD)
+
+predictions = model.transform(test_RDD)
+predictions.show(40)
+
+# Evaluate the model by computing the RMSE on the test data
+predictions = model.transform(test_RDD)
+evaluator = RegressionEvaluator(metricName="rmse", labelCol="overallRating",
+                                predictionCol="prediction")
+rmse = evaluator.evaluate(predictions)
+print("Root-mean-square error = " + str(rmse))
+
+# Generate top 10 movie recommendations for each user
+userRecs = model.recommendForAllUsers(10)
+userRecs.show()
+# Generate top 10 user recommendations for each movie
+movieRecs = model.recommendForAllItems(10)
+
+# Converting in the following format: userID<\tab>itemID1,itemID2,itemID3 ...,itemID10
+my_userRecs1 = userRecs.withColumn("Movie_1", userRecs["recommendations"].getItem(0))\
+.withColumn("Movie_2", userRecs["recommendations"].getItem(1))\
+.withColumn("Movie_3", userRecs["recommendations"].getItem(2))\
+.withColumn("Movie_4", userRecs["recommendations"].getItem(3))\
+.withColumn("Movie_5", userRecs["recommendations"].getItem(4))\
+.withColumn("Movie_6", userRecs["recommendations"].getItem(5))\
+.withColumn("Movie_7", userRecs["recommendations"].getItem(6))\
+.withColumn("Movie_8", userRecs["recommendations"].getItem(7))\
+.withColumn("Movie_9", userRecs["recommendations"].getItem(8))\
+.withColumn("Movie_10", userRecs["recommendations"].getItem(9))
+my_userRecs1.show()
+
+# Converting in the following format: userID<\tab>itemID1,itemID2,itemID3 ...,itemID10
+from pyspark.sql import Row
+my_userRecs2 = my_userRecs1.select(my_userRecs1.UserId, my_userRecs1.Movie_1.getField("workId").alias("Movie_1")\
+                             ,my_userRecs1.Movie_2.getField("workId").alias("Movie_2")\
+                             ,my_userRecs1.Movie_3.getField("workId").alias("Movie_3")\
+                             ,my_userRecs1.Movie_4.getField("workId").alias("Movie_4")\
+                             ,my_userRecs1.Movie_5.getField("workId").alias("Movie_5")\
+                             ,my_userRecs1.Movie_6.getField("workId").alias("Movie_6")\
+                             ,my_userRecs1.Movie_7.getField("workId").alias("Movie_7")\
+                             ,my_userRecs1.Movie_8.getField("workId").alias("Movie_8")\
+                             ,my_userRecs1.Movie_9.getField("workId").alias("Movie_9")\
+                             ,my_userRecs1.Movie_10.getField("workId").alias("Movie_10"))
+my_userRecs2.show(20)
+
+import pandas as pd
+userRecsCsv = userRecs.toPandas()
+userRecsCsv.head()
+
+
+#Exporting the Dataframe to CSV file
+userRecsCsv.to_csv(r"userRecsCsv.csv", index = False)
+
+# Content Based Filtering using KNN
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import re
+import seaborn as sns
+import pandas.util.testing as tm
+%matplotlib inline
+
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# importing anime movies dataset
+anime_movies = pd.read_csv("/content/AnimeMovies.csv")
+
+anime_movies.head(5)
+
+# importing anime ratings dataset
+anime_ratings = pd.read_csv("AnimeRatings.csv")
+
+anime_ratings.head(5)
+
+# importing anime genre dataset
+anime_genre = pd.read_csv("animeListGenres.csv")
+
+# selecting 4 columns from the dataset
+anime_genre= anime_genre[['workId', 'engName', 'episodes', 'genres']]
+anime_genre.head(5)
+
+# importing complete anime dataset
+anime_dataset = pd.read_excel("/content/AnimeDatasetCopy.xlsx")
+anime_dataset.head(10)
+
+#Merging anime dataset with genre dataset
+new_anime_df = pd.merge(anime_dataset,anime_genre,on='workId')
+new_anime_df
+
+# converting the datatypes to float
+new_anime_df["overallRating"] = new_anime_df["overallRating"].astype(float)
+new_anime_df["storyRating"] = new_anime_df["storyRating"].astype(float)
+new_anime_df["animationRating"] = new_anime_df["animationRating"].astype(float)
+new_anime_df["soundRating"] = new_anime_df["soundRating"].astype(float)
+new_anime_df["characterRating"] = new_anime_df["characterRating"].astype(float)
+new_anime_df["enjoymentRating"] = new_anime_df["enjoymentRating"].astype(float)
+
+new_anime_df["UserId"] = new_anime_df["UserId"].astype(float)
+
+
+# Creating dummy variables for genres
+
+anime_features = pd.concat([new_anime_df[["UserId"]],new_anime_df["workId"],new_anime_df["overallRating"],
+                            new_anime_df["storyRating"], new_anime_df["animationRating"],new_anime_df["soundRating"],
+                            new_anime_df["characterRating"], new_anime_df["enjoymentRating"],
+                            new_anime_df["genres"].str.get_dummies(sep=",")],axis=1)
+#new_anime_df["workName"] = new_anime_df["workName"].map(lambda name:re.sub('[^A-Za-z0-9]+', " ", name))
+anime_features.head()
+
+
+
+
+anime_features.columns
+
+# Scaling the variables using minmaxscaler
+from sklearn.preprocessing import MinMaxScaler
+
+min_max_scaler = MinMaxScaler()
+anime_features[['overallRating','storyRating', 'animationRating', 'soundRating', 'characterRating','enjoymentRating' ]] = min_max_scaler.fit_transform(anime_features[['overallRating','storyRating', 'animationRating', 'soundRating', 'characterRating','enjoymentRating' ]])
+
+np.round(anime_features,2)
+
+# Building nearest neighbor model with brute algorithm
+from sklearn.neighbors import NearestNeighbors
+
+model_knn = NearestNeighbors(metric = 'cosine', algorithm = 'brute').fit(anime_features)
+
+distances2, indices2 = model_knn.kneighbors(anime_features)
+
+distances2
+
+# Building nearest neighbor model with ball_tree algorithm
+
+nbrs1 = NearestNeighbors(n_neighbors=50, algorithm='ball_tree').fit(anime_features)
+distances1, indices1 = nbrs1.kneighbors(anime_features)
+
+distances1, indices1 = nbrs1.kneighbors(anime_features)
+distances1
+
+indices1
+
+def get_index_from_name(workName):
+    return new_anime_df[new_anime_df["workName"]==workName].index.tolist()[0]
+
+all_anime_names = list(new_anime_df.workName.values)
+
+def get_id_from_partial_name(partial):
+    for name in all_anime_names:
+        if partial in workName:
+            print(workName,all_anime_names.index(workName))
+
+""" print_similar_query can search for similar animes both by id and by name. """
+
+def print_similar_animes(query=None,id=None):
+    if id:
+        for id in indices2[id][1:]:
+            print(new_anime_df.iloc[id]["workName"])
+    if query:
+        found_id = get_index_from_name(query)
+        for id in indices2[found_id][1:]:
+            print(new_anime_df.iloc[id]["workName"])
+
+def print_similar_animes(query=None,id=None):
+    if id:
+        for id in indices2[id][1:]:
+            print(new_anime_df.iloc[id]["workId"])
+    if query:
+        found_id = get_index_from_name(query)
+        for id in indices2[found_id][1:]:
+            print(new_anime_df.iloc[id]["workId"])
+
+## Example Results of inputting a movie Id or movie name to get recommendations
+
+print_similar_animes(id=22450)
+
+print_similar_animes(query="Calicula_Machine")
+
+print_similar_animes(query="Kimi_no_Na_wa")
+
+print_similar_animes(query="Seiren")
+
+print_similar_animes(id=1557)
+
+# Collaborative Filtering using KNN
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import re
+import seaborn as sns
+import pandas.util.testing as tm
+%matplotlib inline
+
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Total review count for each anime movie
+
+anime_ratingCount = (anime_dataset.
+     groupby(by = ['workName'])['overallRating'].
+     count().
+     reset_index().
+     rename(columns = {'overallRating': 'totalRatingCount'})
+     [['workName', 'totalRatingCount']]
+    )
+
+anime_ratingCount.head(20)
+
+rating_with_totalRatingCount = anime_dataset.merge(anime_ratingCount, left_on = 'workName', right_on = 'workName', how = 'left')
+rating_with_totalRatingCount.head()
+
+# Let’s look at the statistics of total rating count
+pd.set_option('display.float_format', lambda x: '%.3f' % x)
+print(anime_ratingCount['totalRatingCount'].describe())
+
+# Let’s look at the top of the distribution
+print(anime_ratingCount['totalRatingCount'].quantile(np.arange(.9, 1, .01)))
+
+# setting a popularity threshold of 30
+popularity_threshold = 30
+rating_popular_anime = rating_with_totalRatingCount.query('totalRatingCount >= @popularity_threshold')
+rating_popular_anime.head()
+
+rating_popular_anime.shape
+
+# changing UserID datatype to integer
+rating_popular_anime["UserId"] = rating_popular_anime["UserId"].astype(int)
+
+rating_popular_anime.dtypes
+
+# Forming a matrix between UserId and workName
+from scipy.sparse import csr_matrix
+anime_rating_pivot = rating_popular_anime.pivot_table(values='overallRating', index='workName', columns='UserId').fillna(0)
+anime_rating_matrix = csr_matrix(anime_rating_pivot.values)
+
+
+anime_rating_pivot
+
+## Nearest Neighbor using brute algorithm and cosine metric
+
+# The algorithm we use to compute the nearest neighbors is “brute”, 
+# and we specify “metric=cosine” so that the algorithm will calculate 
+# the cosine similarity between rating vectors. Finally, we fit the model.
+
+from sklearn.neighbors import NearestNeighbors
+
+model_knn = NearestNeighbors(metric = 'cosine', algorithm = "brute", radius=0.5, n_neighbors=15, leaf_size=30, p=2.5)
+model_knn.fit(anime_rating_matrix)
+
+query_index = np.random.choice(anime_rating_pivot.shape[0])
+distances, indices = model_knn.kneighbors(anime_rating_pivot.iloc[query_index, :].values.reshape(1, -1), n_neighbors = 6)
+
+for i in range(0, len(distances.flatten())):
+    if i == 0:
+        print('Recommendations for {0}:\n'.format(anime_rating_pivot.index[query_index]))
+    else:
+        print('{0}: {1}, with distance of {2}:'.format(i, anime_rating_pivot.index[indices.flatten()[i]], distances.flatten()[i]))
+
+## Nearest Neighbor using kd_tree algorithm and euclidean metric
+
+# Fitting the model using kd_tree algorithm and euclidean similarity
+
+from sklearn.neighbors import NearestNeighbors
+
+model_knn = NearestNeighbors(metric = 'euclidean', algorithm = "kd_tree", radius=0.5, n_neighbors=15, leaf_size=30, p=2.5)
+model_knn.fit(anime_rating_matrix)
+
+query_index = np.random.choice(anime_rating_pivot.shape[0])
+distances, indices = model_knn.kneighbors(anime_rating_pivot.iloc[query_index, :].values.reshape(1, -1), n_neighbors = 6)
+
+for i in range(0, len(distances.flatten())):
+    if i == 0:
+        print('Recommendations for {0}:\n'.format(anime_rating_pivot.index[query_index]))
+    else:
+        print('{0}: {1}, with distance of {2}:'.format(i, anime_rating_pivot.index[indices.flatten()[i]], distances.flatten()[i]))
